@@ -3,6 +3,7 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -34,6 +35,7 @@ func validateKubernetes(ctx *image.Context) []FailedValidation {
 		return failures
 	}
 
+	failures = append(failures, validateNetwork(&def.Kubernetes)...)
 	failures = append(failures, validateNodes(&def.Kubernetes)...)
 	failures = append(failures, validateManifestURLs(&def.Kubernetes)...)
 	failures = append(failures, validateHelm(&def.Kubernetes, combustion.HelmValuesPath(ctx), combustion.HelmCertsPath(ctx))...)
@@ -45,6 +47,43 @@ func isKubernetesDefined(k8s *image.Kubernetes) bool {
 	return k8s.Version != ""
 }
 
+func validateNetwork(k8s *image.Kubernetes) []FailedValidation {
+	var failures []FailedValidation
+	var vipAddress = k8s.Network.APIVIP
+
+	if vipAddress == "" {
+		numNodes := len(k8s.Nodes)
+		// For single node clusters apiVIP is optional, test only multi-node ones
+		if numNodes > 1 {
+			failures = append(failures, FailedValidation{
+				UserMessage: "The 'apiVIP' field is required in the 'network' section when defining entries under 'nodes'.",
+			})
+		}
+
+		return failures
+	}
+
+	ip, err := netip.ParseAddr(vipAddress)
+	if err != nil {
+		msg := fmt.Sprintf("Invalid cluster API address ('%s')", strings.ToLower(vipAddress))
+		failures = append(failures, FailedValidation{
+			UserMessage: msg,
+			Error: err
+		})
+
+		return failures
+	}
+
+	if !ip.IsGlobalUnicast() {
+		msg := fmt.Sprintf("Invalid non-unicast cluster API address (%s)", ip.String())
+		failures = append(failures, FailedValidation{
+			UserMessage: msg,
+		})
+	}
+
+	return failures
+}
+
 func validateNodes(k8s *image.Kubernetes) []FailedValidation {
 	var failures []FailedValidation
 
@@ -52,12 +91,6 @@ func validateNodes(k8s *image.Kubernetes) []FailedValidation {
 	if numNodes <= 1 {
 		// Single node cluster, node configurations are not required
 		return failures
-	}
-
-	if k8s.Network.APIVIP == "" {
-		failures = append(failures, FailedValidation{
-			UserMessage: "The 'apiVIP' field is required in the 'network' section when defining entries under 'nodes'.",
-		})
 	}
 
 	var nodeTypes []string
